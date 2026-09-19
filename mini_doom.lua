@@ -145,6 +145,32 @@ local function cast_ray(ang)
   return dist, side
 end
 
+-- Continuous movement is polled from held-button state each tick
+-- (rather than only on_button press events) so walking/turning feel
+-- smooth. Movement is scaled by elapsed time, not tick count, so speed
+-- stays consistent even if a tick is delayed. X and Y are moved and
+-- collision-checked separately so the player slides along walls
+-- instead of sticking at the first blocked axis.
+local function update_player(dt)
+  local B = badge.input.BUTTON
+
+  if badge.input.is_down(B.LEFT) then angle = angle - TURN_SPEED * dt end
+  if badge.input.is_down(B.RIGHT) then angle = angle + TURN_SPEED * dt end
+  if angle >= math.pi * 2 then angle = angle - math.pi * 2 end
+  if angle < 0 then angle = angle + math.pi * 2 end
+
+  local moveDist = 0
+  if badge.input.is_down(B.UP) then moveDist = moveDist + MOVE_SPEED * dt end
+  if badge.input.is_down(B.DOWN) then moveDist = moveDist - MOVE_SPEED * dt end
+
+  if moveDist ~= 0 then
+    local nx = px + math.cos(angle) * moveDist
+    local ny = py + math.sin(angle) * moveDist
+    if not is_wall(nx, py) then px = nx end
+    if not is_wall(px, ny) then py = ny end
+  end
+end
+
 -- Redraw the 3D view: one shaded box per screen column, reused every
 -- frame (never recreated). Distance is stored per column so enemy
 -- rendering can occlude sprites behind nearer walls.
@@ -259,9 +285,11 @@ end
 
 function on_tick()
   local now = badge.sys.ms()
+  local dt = clamp(now - lastTickMs, 0, 120) -- clamp guards a stalled tick
   lastTickMs = now
 
   if state == "playing" then
+    update_player(dt)
     render_view()
     update_hud()
   end
