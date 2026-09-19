@@ -171,9 +171,101 @@ local function update_player(dt)
   end
 end
 
+-- Distance and view-relative angle from the player to an enemy, angle
+-- normalized to (-pi, pi] so it can be compared directly against the
+-- view's field of view.
+local function enemy_view_info(e)
+  local dx, dy = e.x - px, e.y - py
+  local dist = math.sqrt(dx * dx + dy * dy)
+  local rel = math.atan(dy, dx) - angle
+  while rel > math.pi do rel = rel - 2 * math.pi end
+  while rel <= -math.pi do rel = rel + 2 * math.pi end
+  return dist, rel
+end
+
+-- Stage a short LED event (combat hit/kill/damage cue); update_leds
+-- renders it and falls back to the ambient display once it expires.
+local function trigger_led(kind, now, durationMs)
+  ledEventUntil = now + durationMs
+  if kind == "kill" then ledEventColor = { 0, 255, 60 }
+  elseif kind == "hit" then ledEventColor = { 255, 180, 0 }
+  elseif kind == "miss" then ledEventColor = { 40, 40, 40 }
+  elseif kind == "hit_player" then ledEventColor = { 255, 0, 0 }
+  elseif kind == "dead" then ledEventColor = { 180, 0, 0 }
+  end
+end
+
+-- Respawns dead imps after their timer, and deals slow melee damage
+-- while an alive imp is adjacent (rate-limited per enemy).
+local function update_enemies(now)
+  for i = 1, #enemies do
+    local e = enemies[i]
+    if not e.alive and now >= e.respawnAt then
+      local sp = spawnPoints[badge.sys.random(#spawnPoints) + 1]
+      e.x, e.y, e.alive, e.hp = sp[1], sp[2], true, 2
+    end
+    if e.alive then
+      local dist = enemy_view_info(e)
+      if dist < 1.1 and now >= e.nextHit then
+        e.nextHit = now + 500
+        health = clamp(health - 8, 0, 100)
+        trigger_led("hit_player", now, 300)
+      end
+    end
+  end
+end
+
+-- Fire in the narrow center cone: closest visible, alive imp within
+-- range takes a hit. "Visible" means the wall column nearest the
+-- crosshair is not nearer than the imp (so shots can't go through walls).
+local function attempt_shoot(now)
+  if now < nextShotAt then return end
+  nextShotAt = now + 350
+
+  local centerCol = clamp(math.floor(CENTER_X / COL_W) + 1, 1, NUM_RAYS)
+  local target, targetDist = nil, nil
+  for i = 1, #enemies do
+    local e = enemies[i]
+    if e.alive then
+      local dist, rel = enemy_view_info(e)
+      if math.abs(rel) < 0.14 and dist < 7 and dist < (wallDist[centerCol] or 8) + 0.3 then
+        if not target or dist < targetDist then target, targetDist = e, dist end
+      end
+    end
+  end
+
+  if target then
+    target.hp = target.hp - 1
+    if target.hp <= 0 then
+      target.alive = false
+      target.respawnAt = now + 4000
+      kills = kills + 1
+      trigger_led("kill", now, 250)
+    else
+      trigger_led("hit", now, 150)
+    end
+  else
+    trigger_led("miss", now, 80)
+  end
+end
+
+local function check_death(now)
+  if state == "playing" and health <= 0 then
+    state = "dead"
+    if kills > best then
+      best = kills
+      badge.store.set_int("best_kills", best)
+    end
+    set_overlay(true, "YOU DIED",
+      "Kills: " .. kills .. "  Best: " .. best .. "\nPress START to retry")
+    trigger_led("dead", now, 100000)
+  end
+end
+
 -- Redraw the 3D view: one shaded box per screen column, reused every
 -- frame (never recreated). Distance is stored per column so enemy
--- rendering can occlude sprites behind nearer walls.
+-- rendering can occlude sprites behind nearer walls. Imps are drawn as
+-- distance-scaled billboards after the walls so they render in front.
 local function render_view()
   for i = 1, NUM_RAYS do
     local dist, side = cast_ray(angle + RAY_OFFSET[i])
@@ -188,6 +280,29 @@ local function render_view()
     if side == 1 then b = math.floor(b * 0.7) end
     local r, g, bl = b, math.floor(b * 0.55), math.floor(b * 0.35)
     cols[i]:set_color(r * 65536 + g * 256 + bl)
+  end
+
+  dangerDist = nil
+  for i = 1, #enemies do
+    local e, box = enemies[i], enemyBoxes[i]
+    local shown = false
+    if e.alive then
+      local dist, rel = enemy_view_info(e)
+      if dist < 8 and math.abs(rel) < HALF_FOV + 0.1 then
+        local screenX = CENTER_X + (rel / HALF_FOV) * (SCREEN_W / 2)
+        local colIdx = clamp(math.floor(screenX / COL_W) + 1, 1, NUM_RAYS)
+        if dist < (wallDist[colIdx] or 8) + 0.25 then
+          local sh = clamp(math.floor(VIEW_H / dist), 6, math.floor(VIEW_H * 1.3))
+          local sw = math.floor(sh * 0.55)
+          box:set_size(sw, sh)
+          box:set_pos(math.floor(screenX - sw / 2), VIEW_CENTER_Y - math.floor(sh / 2))
+          box:hidden(false)
+          shown = true
+          if not dangerDist or dist < dangerDist then dangerDist = dist end
+        end
+      end
+    end
+    if not shown then box:hidden(true) end
   end
 end
 
@@ -290,8 +405,10 @@ function on_tick()
 
   if state == "playing" then
     update_player(dt)
+    update_enemies(now)
     render_view()
     update_hud()
+    check_death(now)
   end
 
   badge.led.clear()
@@ -307,6 +424,8 @@ function on_button(button, kind)
       set_overlay(false)
       update_hud()
     end
+  elseif button == badge.input.BUTTON.A then
+    if state == "playing" then attempt_shoot(badge.sys.ms()) end
   end
 end
 
