@@ -88,6 +88,83 @@ local function clamp(n, lo, hi)
   return math.max(lo, math.min(hi, n))
 end
 
+-- x, y may be floats (player position) or integers (grid-step position
+-- during DDA below); floor() makes both cases resolve to the same cell.
+local function is_wall(x, y)
+  local gx = math.floor(x) + 1
+  local gy = math.floor(y) + 1
+  if gx < 1 or gx > MAP_SIZE or gy < 1 or gy > MAP_SIZE then return true end
+  return MAP[gy]:sub(gx, gx) == "1"
+end
+
+-- Classic grid DDA raycast (Lodev-style): steps cell-by-cell along the
+-- ray instead of small-stepping through space, so cost is bounded by the
+-- number of grid lines crossed, not by view distance / step size.
+-- Returns perpendicular wall distance (already fisheye-corrected) and
+-- which axis was hit (0 = x-side, 1 = y-side, used for shading).
+local function cast_ray(ang)
+  local rdx, rdy = math.cos(ang), math.sin(ang)
+  local mapX, mapY = math.floor(px), math.floor(py)
+  local deltaDistX = (rdx == 0) and 1e30 or math.abs(1 / rdx)
+  local deltaDistY = (rdy == 0) and 1e30 or math.abs(1 / rdy)
+
+  local stepX, sideDistX
+  if rdx < 0 then
+    stepX, sideDistX = -1, (px - mapX) * deltaDistX
+  else
+    stepX, sideDistX = 1, (mapX + 1 - px) * deltaDistX
+  end
+  local stepY, sideDistY
+  if rdy < 0 then
+    stepY, sideDistY = -1, (py - mapY) * deltaDistY
+  else
+    stepY, sideDistY = 1, (mapY + 1 - py) * deltaDistY
+  end
+
+  local side, hit = 0, false
+  for _ = 1, 24 do -- generous bound for a 10x10 map
+    if sideDistX < sideDistY then
+      sideDistX = sideDistX + deltaDistX
+      mapX = mapX + stepX
+      side = 0
+    else
+      sideDistY = sideDistY + deltaDistY
+      mapY = mapY + stepY
+      side = 1
+    end
+    if is_wall(mapX, mapY) then hit = true break end
+  end
+
+  local dist
+  if side == 0 then
+    dist = (mapX - px + (1 - stepX) / 2) / rdx
+  else
+    dist = (mapY - py + (1 - stepY) / 2) / rdy
+  end
+  if not hit or dist <= 0 then dist = 8 end
+  return dist, side
+end
+
+-- Redraw the 3D view: one shaded box per screen column, reused every
+-- frame (never recreated). Distance is stored per column so enemy
+-- rendering can occlude sprites behind nearer walls.
+local function render_view()
+  for i = 1, NUM_RAYS do
+    local dist, side = cast_ray(angle + RAY_OFFSET[i])
+    wallDist[i] = dist
+
+    local lh = clamp(math.floor(VIEW_H / math.max(dist, 0.05)), 2, VIEW_H * 2)
+    local y = VIEW_CENTER_Y - math.floor(lh / 2)
+    cols[i]:set_pos((i - 1) * COL_W, y)
+    cols[i]:set_size(COL_W, lh)
+
+    local b = clamp(255 - math.floor(dist * 24), 50, 220)
+    if side == 1 then b = math.floor(b * 0.7) end
+    local r, g, bl = b, math.floor(b * 0.55), math.floor(b * 0.35)
+    cols[i]:set_color(r * 65536 + g * 256 + bl)
+  end
+end
+
 local function set_overlay(visible, title, hint)
   titleBox:hidden(not visible)
   titleText:hidden(not visible)
@@ -183,6 +260,12 @@ end
 function on_tick()
   local now = badge.sys.ms()
   lastTickMs = now
+
+  if state == "playing" then
+    render_view()
+    update_hud()
+  end
+
   badge.led.clear()
   badge.led.show()
 end
