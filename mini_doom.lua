@@ -306,6 +306,46 @@ local function render_view()
   end
 end
 
+-- LED language: staged combat events (trigger_led) take priority for
+-- their short duration; otherwise an ambient cue reflects current
+-- danger/health so the LEDs stay meaningful between events. All six
+-- LEDs are used together here since the cues are global game state,
+-- not positional.
+local function update_leds(now)
+  if state == "title" then
+    badge.led.clear()
+    badge.led.show()
+    return
+  end
+
+  if ledEventColor and now < ledEventUntil then
+    local c = ledEventColor
+    badge.led.set_all(c[1], c[2], c[3])
+    badge.led.show()
+    return
+  end
+  ledEventColor = nil
+
+  if state == "dead" then
+    local phase = (now % 1200) / 1200
+    local wave = phase < 0.5 and phase * 2 or (2 - phase * 2)
+    badge.led.set_all(math.floor(30 + 150 * wave), 0, 0)
+    badge.led.show()
+    return
+  end
+
+  if health <= 25 then
+    local phase = (now % 900) / 900
+    local wave = phase < 0.5 and phase * 2 or (2 - phase * 2)
+    badge.led.set_all(math.floor(40 + 180 * wave), 0, 0)
+  elseif dangerDist and dangerDist < 3 then
+    badge.led.set_all(60, 0, 0)
+  else
+    badge.led.set_all(0, 0, 22) -- dim idle glow
+  end
+  badge.led.show()
+end
+
 local function set_overlay(visible, title, hint)
   titleBox:hidden(not visible)
   titleText:hidden(not visible)
@@ -411,8 +451,7 @@ function on_tick()
     check_death(now)
   end
 
-  badge.led.clear()
-  badge.led.show()
+  update_leds(now)
 end
 
 function on_button(button, kind)
